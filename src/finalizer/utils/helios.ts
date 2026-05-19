@@ -413,7 +413,7 @@ async function enrichHeliosActions(
 }
 
 // --- Helper: Query and Filter L1 Events ---
-async function getRelevantL1Events(
+export async function getRelevantL1Events(
   _logger: winston.Logger,
   hubPoolClient: HubPoolClient,
   l1SpokePoolClient: EVMSpokePoolClient,
@@ -424,12 +424,11 @@ async function getRelevantL1Events(
   const l1Provider = hubPoolClient.hubPool.provider;
   const hubPoolStoreContract = getHubPoolStoreContract(l1ChainId, l1Provider);
 
-  /**
-   * @dev We artificially shorten the lookback time period for L1 events by a factor of 2. We want to avoid race conditions where
-   * we see an old event on L1, but not look back far enough on L2 to see that the event has been executed successfully.
-   */
   const toBlock = l1SpokePoolClient.latestHeightSearched;
-  const fromBlock = Math.floor((l1SpokePoolClient.eventSearchConfig.from + toBlock) / 2);
+  // Search the full configured lookback window on L1. Recovery for partially finalized Helios messages depends on
+  // rediscovering the original StoredCallData event, and completion/deduplication is handled by the L2 relayed nonce
+  // query plus filterRequiredActions().
+  const fromBlock = l1SpokePoolClient.eventSearchConfig.from;
   const l1SearchConfig: EventSearchConfig = {
     from: fromBlock,
     to: toBlock,
