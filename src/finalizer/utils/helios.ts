@@ -412,8 +412,22 @@ async function enrichHeliosActions(
   return readyActions;
 }
 
+export function getRelevantL1EventSearchConfig(
+  l1SpokePoolClient: Pick<EVMSpokePoolClient, "latestHeightSearched" | "eventSearchConfig">
+): EventSearchConfig {
+  const toBlock = l1SpokePoolClient.latestHeightSearched;
+  // Search the full configured lookback window on L1. Recovery for partially finalized Helios messages depends on
+  // rediscovering the original StoredCallData event, and completion/deduplication is handled by the L2 relayed nonce
+  // query plus filterRequiredActions().
+  return {
+    from: l1SpokePoolClient.eventSearchConfig.from,
+    to: toBlock,
+    maxLookBack: l1SpokePoolClient.eventSearchConfig.maxLookBack,
+  };
+}
+
 // --- Helper: Query and Filter L1 Events ---
-export async function getRelevantL1Events(
+async function getRelevantL1Events(
   _logger: winston.Logger,
   hubPoolClient: HubPoolClient,
   l1SpokePoolClient: EVMSpokePoolClient,
@@ -424,16 +438,7 @@ export async function getRelevantL1Events(
   const l1Provider = hubPoolClient.hubPool.provider;
   const hubPoolStoreContract = getHubPoolStoreContract(l1ChainId, l1Provider);
 
-  const toBlock = l1SpokePoolClient.latestHeightSearched;
-  // Search the full configured lookback window on L1. Recovery for partially finalized Helios messages depends on
-  // rediscovering the original StoredCallData event, and completion/deduplication is handled by the L2 relayed nonce
-  // query plus filterRequiredActions().
-  const fromBlock = l1SpokePoolClient.eventSearchConfig.from;
-  const l1SearchConfig: EventSearchConfig = {
-    from: fromBlock,
-    to: toBlock,
-    maxLookBack: l1SpokePoolClient.eventSearchConfig.maxLookBack,
-  };
+  const l1SearchConfig = getRelevantL1EventSearchConfig(l1SpokePoolClient);
 
   const storedCallDataFilter = hubPoolStoreContract.filters.StoredCallData();
 
