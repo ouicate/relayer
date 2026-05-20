@@ -35,6 +35,7 @@ import {
   getSpokePoolAddress,
   chainIsEvm,
   chainIsSvm,
+  chainIsTvm,
   EvmAddress,
   Address,
   SvmAddress,
@@ -368,8 +369,9 @@ export class ProfitClient {
     tokenGasCost = tokenGasCost.mul(gasMultiplier).div(fixedPoint);
 
     // EVM gas is metered in wei (1e-18 base units) regardless of the native token's nominal decimals
-    // (e.g. Tempo's pathUSD is 6dp but gas is still wei). SVM meters in lamports (1e-9 SOL).
-    const gasAccountingDecimals = chainIsSvm(chainId) ? gasToken.decimals : 18;
+    // (e.g. Tempo's pathUSD is 6dp but gas is still wei). SVM and TVM meter gas in the native token's
+    // base units (lamports for SOL, SUN for TRX).
+    const gasAccountingDecimals = chainIsSvm(chainId) || chainIsTvm(chainId) ? gasToken.decimals : 18;
     const gasCostUsd = tokenGasCost.mul(gasTokenPriceUsd).div(bn10.pow(gasAccountingDecimals));
 
     const auxiliaryNativeTokenCost = this.getAuxiliaryNativeTokenCost(deposit);

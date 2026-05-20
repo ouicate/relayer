@@ -34,6 +34,7 @@ import {
   expect,
   hubPoolFixture,
   randomAddress,
+  sinon,
   winston,
 } from "./utils";
 
@@ -192,6 +193,10 @@ describe("ProfitClient: Consider relay profit", () => {
     profitClient.setTokenPrices(tokenPrices);
   });
 
+  afterEach(() => {
+    sinon.restore();
+  });
+
   // Verify gas cost calculation first, so we can leverage it in all subsequent tests.
   it("Verify gas cost estimation", async () => {
     for (const destinationChainId of chainIds) {
@@ -215,6 +220,30 @@ describe("ProfitClient: Consider relay profit", () => {
       expect(estimate.gasCostUsd.eq(tokenGasCost.mul(gasTokenPriceUsd).div(toBN(10).pow(gasToken.decimals)))).to.be
         .true;
     }
+  });
+
+  it("Uses TVM gas token decimals when pricing gas costs", async () => {
+    const destinationChainId = CHAIN_IDs.TRON;
+    const deposit = {
+      ...v3DepositTemplate,
+      destinationChainId,
+      message,
+    };
+    const gasToken = profitClient.resolveGasToken(destinationChainId);
+    const nativeGasCost = toBN(100_000);
+    const gasPrice = toBN(25);
+    const tokenGasCost = toBN(2_500_000); // 2.5 TRX in SUN
+    const gasTokenPriceUsd = toBNWei("0.30");
+
+    profitClient.mapToken(gasToken.symbol, gasToken.address);
+    profitClient.setTokenPrice(gasToken.symbol, gasTokenPriceUsd);
+    sinon.stub(profitClient, "getTotalGasCost").resolves({ nativeGasCost, tokenGasCost, gasPrice });
+
+    const estimate = await profitClient.estimateFillCost(deposit);
+
+    expect(gasToken.decimals).to.equal(6);
+    expect(estimate.gasCostUsd.eq(toBNWei("0.75"))).to.be.true;
+    expect(estimate.gasCostUsd.eq(tokenGasCost.mul(gasTokenPriceUsd).div(toBN(10).pow(gasToken.decimals)))).to.be.true;
   });
 
   it("Verify gas padding", async () => {
