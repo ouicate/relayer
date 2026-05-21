@@ -342,7 +342,11 @@ export class GaslessRelayer {
           depositId
         );
         if (depositMessage.permitType === "permit") {
-          const observedDeposit = await this._findDepositByDepositId(originChainId, depositId, depositMessage.spokePool);
+          const observedDeposit = await this._findDepositByDepositId(
+            originChainId,
+            depositId,
+            depositMessage.spokePool
+          );
           if (isDefined(observedDeposit)) {
             this.observedDeposits[originChainId].add(depositKey);
           }

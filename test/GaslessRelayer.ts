@@ -448,7 +448,12 @@ function makeSwapAndBridgePermitCctpMessage(
     permitApprovalDeadline: 999999999999,
     permit: {
       types: { SwapAndDepositData: [] },
-      domain: { name: "ACROSS-PERIPHERY", version: "1.0.0", chainId: ORIGIN_CHAIN_ID, verifyingContract: DUMMY_ADDRESS },
+      domain: {
+        name: "ACROSS-PERIPHERY",
+        version: "1.0.0",
+        chainId: ORIGIN_CHAIN_ID,
+        verifyingContract: DUMMY_ADDRESS,
+      },
       primaryType: "SwapAndDepositData",
       message: {
         submissionFees: { amount: "100", recipient: DUMMY_ADDRESS },
