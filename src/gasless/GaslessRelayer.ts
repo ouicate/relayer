@@ -60,7 +60,6 @@ import {
   extractGaslessDepositFields,
   getGaslessPermitNonce,
   isPermit2NonceUsed,
-  isErc2612PermitNonceConsumed,
   isAllowedGaslessPair,
   isExclusivityRelative,
   isStablecoin,
@@ -329,7 +328,7 @@ export class GaslessRelayer {
    * - EIP-3009 / erc3009 (swap-and-bridge): AuthorizationUsed on swapToken (the signed token); observed key uses depositData.inputToken to match messageFilter / FundsDeposited.
    * - Permit2 (bridge only): FundsDeposited on SpokePool by depositId (no AuthorizationUsed on the transfer token).
    * - Permit2 (swap-and-bridge): Permit2 nonceBitmap on canonical Permit2 — if nonce used, treat deposit as already submitted.
-   * - Permit (swap-and-bridge): token.nonces(owner) > signed nonce means permit already consumed.
+   * - Permit (swap-and-bridge): look up the origin FundsDeposited event by depositId on the requested spokePool.
    */
   protected async updateObservedCctpDeposits(apiMessages: AnyGaslessDepositMessage[]): Promise<void> {
     const cctpMessages = apiMessages.filter((msg) => this._isCctpDeposit(msg.originChainId, msg.spokePool));
@@ -337,27 +336,27 @@ export class GaslessRelayer {
       const { originChainId, depositId } = depositMessage;
 
       if (depositMessage.depositFlowType === "swapAndBridge") {
+        const depositKey = this._getDepositKey(
+          toAddressType(depositMessage.depositData.inputToken, originChainId).toNative(),
+          originChainId,
+          depositId
+        );
+        if (depositMessage.permitType === "permit") {
+          const observedDeposit = await this._findDepositByDepositId(originChainId, depositId, depositMessage.spokePool);
+          if (isDefined(observedDeposit)) {
+            this.observedDeposits[originChainId].add(depositKey);
+          }
+          return;
+        }
+
         const swapTokenAddr = toAddressType(depositMessage.swapToken, originChainId);
-        if (["permit2", "permit"].includes(depositMessage.permitType)) {
+        if (depositMessage.permitType === "permit2") {
           const owner = getGaslessAuthorizerAddress(depositMessage);
           const permitNonce = getGaslessPermitNonce(depositMessage);
-          const nonceUsed =
-            depositMessage.permitType === "permit2"
-              ? await isPermit2NonceUsed(this.permit2Contracts[originChainId], owner, permitNonce)
-              : await isErc2612PermitNonceConsumed({
-                  tokenAddress: swapTokenAddr.toEvmAddress(),
-                  owner,
-                  signedNonce: permitNonce,
-                  provider: this.providersByChain[originChainId],
-                });
+          const nonceUsed = await isPermit2NonceUsed(this.permit2Contracts[originChainId], owner, permitNonce);
           if (!nonceUsed) {
             return;
           }
-          const depositKey = this._getDepositKey(
-            toAddressType(depositMessage.depositData.inputToken, originChainId).toNative(),
-            originChainId,
-            depositId
-          );
           this.observedDeposits[originChainId].add(depositKey);
           return;
         }
@@ -367,11 +366,6 @@ export class GaslessRelayer {
         if (!isDefined(transactionHash)) {
           return;
         }
-        const depositKey = this._getDepositKey(
-          toAddressType(depositMessage.depositData.inputToken, originChainId).toNative(),
-          originChainId,
-          depositId
-        );
         this.observedDeposits[originChainId].add(depositKey);
         return;
       }
@@ -562,8 +556,8 @@ export class GaslessRelayer {
           case MessageState.DEPOSIT_CONFIRM: {
             const depositReceipt = await depositReceiptPromise;
 
-            // Swap-and-bridge and CCTP bridge: no fill; confirm via receipt hash and/or nonce/auth usage.
-            // Permit2: nonceBitmap, Permit (EIP-2612): token nonce advancement, EIP-3009: AuthorizationUsed.
+            // Swap-and-bridge and CCTP bridge: no fill; confirm via receipt hash and/or observed origin submission.
+            // Permit2: nonceBitmap, Permit (EIP-2612): origin FundsDeposited, EIP-3009: AuthorizationUsed.
             if (isSwap || isCctpDeposit) {
               let found: string | undefined = depositReceipt?.transactionHash;
 
@@ -572,14 +566,13 @@ export class GaslessRelayer {
                 if (depositMessage.permitType === "erc3009") {
                   found = await this._findAuthorizationUsed(originChainId, authToken, authorizer, nonce);
                 } else if (depositMessage.permitType === "permit") {
-                  const nonceConsumed = await isErc2612PermitNonceConsumed({
-                    tokenAddress: authToken.toEvmAddress(),
-                    owner: authorizer,
-                    signedNonce: nonce,
-                    provider: this.providersByChain[originChainId],
-                  });
-                  if (nonceConsumed) {
-                    found = "permit-nonce-consumed";
+                  const observedDeposit = await this._findDepositByDepositId(
+                    originChainId,
+                    depositId,
+                    depositMessage.spokePool
+                  );
+                  if (isDefined(observedDeposit)) {
+                    found = observedDeposit.txnRef;
                   }
                 } else if (depositMessage.permitType === "permit2") {
                   const nonceUsed = await isPermit2NonceUsed(this.permit2Contracts[originChainId], authorizer, nonce);
@@ -934,12 +927,14 @@ export class GaslessRelayer {
    * @notice Finds a deposit by depositId (and optional depositor) by querying SpokePool FundsDeposited events.
    * @dev Used for Permit2 flow where there is no AuthorizationUsed on the token; the SpokePool still emits FundsDeposited when depositWithPermit2 is used.
    */
-  private async _findDepositByDepositId(
+  protected async _findDepositByDepositId(
     originChainId: number,
-    depositId: string
+    depositId: string,
+    spokePoolAddress?: string
   ): Promise<Omit<DepositWithBlock, "fromLiteChain" | "toLiteChain" | "quoteBlockNumber"> | undefined> {
     const provider = this.providersByChain[originChainId];
-    const originSpokePool = this.spokePools[originChainId].connect(provider);
+    const baseSpokePool = (this.spokePools[originChainId] ?? getSpokePool(originChainId)).connect(provider);
+    const originSpokePool = baseSpokePool.attach(spokePoolAddress ?? baseSpokePool.address);
     const searchConfig = await this._getEventSearchConfig(originChainId);
     const events = await paginatedEventQuery(
       originSpokePool,

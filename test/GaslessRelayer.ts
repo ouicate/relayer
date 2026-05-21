@@ -118,12 +118,18 @@ class TestableGaslessRelayer extends GaslessRelayer {
   };
   public findDepositFn: (depositMessage: GaslessDepositMessage) => Promise<StrippedDeposit | undefined> = async () =>
     undefined;
+  public findDepositByIdFn: (
+    originChainId: number,
+    depositId: string,
+    spokePoolAddress?: string
+  ) => Promise<StrippedDeposit | undefined> = async () => undefined;
 
   // Call counters -- incremented by the overrides below.
   public initiateDepositCalls = 0;
   public extractDepositFromReceiptCalls = 0;
   public initiateFillCalls = 0;
   public findDepositCalls = 0;
+  public findDepositByIdCalls = 0;
 
   // Track state transitions, keyed by depositKey (e.g., nonce)
   public stateTransitions: { [depositKey: string]: Array<{ from: MessageState; to: MessageState }> } = {};
@@ -162,6 +168,14 @@ class TestableGaslessRelayer extends GaslessRelayer {
   protected override async _findDeposit(depositMessage: GaslessDepositMessage): Promise<StrippedDeposit | undefined> {
     this.findDepositCalls++;
     return this.findDepositFn(depositMessage);
+  }
+  protected override async _findDepositByDepositId(
+    originChainId: number,
+    depositId: string,
+    spokePoolAddress?: string
+  ): Promise<StrippedDeposit | undefined> {
+    this.findDepositByIdCalls++;
+    return this.findDepositByIdFn(originChainId, depositId, spokePoolAddress);
   }
 
   protected override _setState(depositKey: string, state: MessageState): void {
@@ -381,6 +395,78 @@ function makeSwapAndBridgePermit2CctpMessage(
     depositData,
     submissionFees: { amount: "100", recipient: DUMMY_ADDRESS },
     swapToken: USDC_MAINNET,
+    exchange: DUMMY_ADDRESS,
+    transferType: 0,
+    swapTokenAmount: "1000000",
+    minExpectedInputTokenAmount: "1000000",
+    routerCalldata: "0x",
+    enableProportionalAdjustment: false,
+    spokePool: CCTP_SPOKE_POOL,
+    nonce: "1",
+  };
+}
+
+/**
+ * Swap-and-bridge + CCTP + ERC-2612 permit. The witness nonce is the Across deposit nonce, not the token permit nonce.
+ */
+function makeSwapAndBridgePermitCctpMessage(
+  overrides: Partial<{
+    depositId: string;
+    witnessNonce: string;
+    swapToken: string;
+    depositData: Partial<SwapAndBridgeGaslessDepositMessage["depositData"]>;
+  }> = {}
+): SwapAndBridgeGaslessDepositMessage {
+  const fillDeadline = getCurrentTime() + 3600;
+  const depositData: SwapAndBridgeGaslessDepositMessage["depositData"] = {
+    inputToken: USDC_MAINNET,
+    outputToken: USDC_BASE,
+    outputAmount: "1000000",
+    depositor: DUMMY_ADDRESS,
+    recipient: DUMMY_ADDRESS,
+    destinationChainId: DESTINATION_CHAIN_ID,
+    exclusiveRelayer: DUMMY_ADDRESS,
+    quoteTimestamp: getCurrentTime(),
+    fillDeadline,
+    exclusivityDeadline: 1700000000,
+    exclusivityParameter: 1700000000,
+    message: "0x",
+    ...overrides.depositData,
+  };
+  const witnessNonce = overrides.witnessNonce ?? "1";
+  const depositId = overrides.depositId ?? "2000000";
+  const swapToken = overrides.swapToken ?? USDC_MAINNET;
+
+  return {
+    depositFlowType: "swapAndBridge",
+    originChainId: ORIGIN_CHAIN_ID,
+    depositId,
+    requestId: "req-swap-permit-cctp",
+    signature: DUMMY_SIGNATURE,
+    permitType: "permit",
+    permitApprovalSignature: DUMMY_SIGNATURE,
+    permitApprovalDeadline: 999999999999,
+    permit: {
+      types: { SwapAndDepositData: [] },
+      domain: { name: "ACROSS-PERIPHERY", version: "1.0.0", chainId: ORIGIN_CHAIN_ID, verifyingContract: DUMMY_ADDRESS },
+      primaryType: "SwapAndDepositData",
+      message: {
+        submissionFees: { amount: "100", recipient: DUMMY_ADDRESS },
+        depositData,
+        swapToken,
+        exchange: DUMMY_ADDRESS,
+        transferType: 0,
+        swapTokenAmount: "1000000",
+        minExpectedInputTokenAmount: "1000000",
+        routerCalldata: "0x",
+        enableProportionalAdjustment: false,
+        spokePool: CCTP_SPOKE_POOL,
+        nonce: witnessNonce,
+      },
+    },
+    depositData,
+    submissionFees: { amount: "100", recipient: DUMMY_ADDRESS },
+    swapToken,
     exchange: DUMMY_ADDRESS,
     transferType: 0,
     swapTokenAmount: "1000000",
@@ -874,6 +960,56 @@ describe("GaslessRelayer", function () {
 
       expect(relayer.getMessageState(nonce)).to.equal(MessageState.FILLED);
       expect(relayer.initiateDepositCalls).to.equal(1);
+      expect(relayer.initiateFillCalls).to.equal(0);
+      expectCctpTransitions(relayer.stateTransitions[nonce]);
+    });
+  });
+
+  describe("Permit observation (CCTP swap)", function () {
+    it("updateObservedCctpDeposits ignores unrelated ERC-2612 nonce changes", async function () {
+      const fakePermitToken = await smock.fake(["function nonces(address owner) view returns (uint256)"]);
+      fakePermitToken.nonces.returns(ethers.BigNumber.from(2));
+      const msg = makeSwapAndBridgePermitCctpMessage({
+        depositId: "obs-permit-1",
+        witnessNonce: "1",
+        swapToken: fakePermitToken.address,
+      });
+      const expectedKey = relayer.getDepositKey(
+        EvmAddress.from(msg.depositData.inputToken).toNative(),
+        ORIGIN_CHAIN_ID,
+        msg.depositId
+      );
+
+      await relayer.runUpdateObservedCctpDeposits([msg]);
+
+      expect(relayer.findDepositByIdCalls).to.equal(1);
+      expect(relayer.getObservedDepositsSet(ORIGIN_CHAIN_ID).has(expectedKey)).to.equal(false);
+    });
+
+    it("CCTP swap + permit confirms from an observed origin deposit when the receipt is unavailable", async function () {
+      const fakePermitToken = await smock.fake(["function nonces(address owner) view returns (uint256)"]);
+      fakePermitToken.nonces.returns(ethers.BigNumber.from(0));
+      const msg = makeSwapAndBridgePermitCctpMessage({
+        depositId: "obs-permit-2",
+        witnessNonce: "1",
+        swapToken: fakePermitToken.address,
+      });
+      const nonce = depositNonceForSwap(relayer, msg);
+
+      relayer.queryGaslessApiFn = async () => [msg];
+      relayer.initiateDepositFn = async () => {
+        if (relayer.initiateDepositCalls > 1) {
+          throw new Error("permit deposit should not be re-submitted after observing the origin deposit");
+        }
+        return null;
+      };
+      relayer.findDepositByIdFn = async () => makeFakeDepositEvent();
+
+      await relayer.runEvaluateApiSignatures();
+
+      expect(relayer.getMessageState(nonce)).to.equal(MessageState.FILLED);
+      expect(relayer.initiateDepositCalls).to.equal(1);
+      expect(relayer.findDepositByIdCalls).to.equal(1);
       expect(relayer.initiateFillCalls).to.equal(0);
       expectCctpTransitions(relayer.stateTransitions[nonce]);
     });
